@@ -57,8 +57,12 @@ object Shell {
 
     data class ExecResult(val lines: List<String>, val exitCode: Int, val root: Boolean)
 
-    /** 执行 root 命令，逐行回调（回调在调用线程，UI 层自行切主线程）。 */
-    fun runRootCommand(command: String, onLine: (String) -> Unit = {}): ExecResult {
+    /** 执行 root 命令；stdout/stderr 分开回调（回调在读取线程，UI 层自行切主线程）。 */
+    fun runRootCommand(
+        command: String,
+        onOut: (String) -> Unit = {},
+        onErr: (String) -> Unit = {}
+    ): ExecResult {
         val su = suPath()
         val attempts = mutableListOf<List<String>>()
         if (su != null) attempts.add(listOf(su, "-c", command))
@@ -67,20 +71,36 @@ object Shell {
             return ExecResult(listOf("没有可用的 root 通道（su 不存在）"), -1, false)
         }
         var lastErr = "执行失败"
-        for (argv in attempts) {
+        for ((idx, argv) in attempts.withIndex()) {
             try {
-                val p = ProcessBuilder(argv).redirectErrorStream(true).start()
-                val lines = mutableListOf<String>()
-                p.inputStream.bufferedReader().useLines { seq ->
-                    for (line in seq) {
-                        lines.add(line)
-                        onLine(line)
-                        if (lines.size > 20000) break
-                    }
+                val p = ProcessBuilder(argv).start()
+                val stdout = java.util.Collections.synchronizedList(mutableListOf<String>())
+                val stderr = java.util.Collections.synchronizedList(mutableListOf<String>())
+                val tOut = Thread {
+                    try {
+                        p.inputStream.bufferedReader().useLines { seq ->
+                            for (line in seq) {
+                                if (stdout.size > 20000) break
+                                stdout.add(line); onOut(line)
+                            }
+                        }
+                    } catch (_: Throwable) {}
                 }
+                val tErr = Thread {
+                    try {
+                        p.errorStream.bufferedReader().useLines { seq ->
+                            for (line in seq) {
+                                if (stderr.size > 20000) break
+                                stderr.add(line); onErr(line)
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                }
+                tOut.start(); tErr.start()
                 val code = p.waitFor()
-                if (code == 0 || argv[0] == attempts.last()[0]) {
-                    return ExecResult(lines, code, true)
+                tOut.join(2000); tErr.join(2000)
+                if (code == 0 || idx == attempts.lastIndex) {
+                    return ExecResult(stdout + stderr, code, true)
                 }
                 lastErr = "exit=$code"
             } catch (t: Throwable) {
@@ -89,6 +109,10 @@ object Shell {
         }
         return ExecResult(listOf("执行失败：$lastErr"), -1, false)
     }
+
+    /** 兼容旧调用：只关心合并输出。 */
+    fun runRootCommandSimple(command: String, onLine: (String) -> Unit = {}): ExecResult =
+        runRootCommand(command, onOut = onLine, onErr = onLine)
 
     /** 检测 root 是否已授权（su -c id，最多等 3 秒）。 */
     fun rootAuthorized(): Boolean {

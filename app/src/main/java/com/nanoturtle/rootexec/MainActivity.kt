@@ -1,10 +1,13 @@
 package com.nanoturtle.rootexec
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -12,8 +15,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -22,13 +25,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -64,9 +67,16 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+enum class LineKind { CMD, OUT, ERR, SYS }
+
+data class ConsoleLine(val text: String, val kind: LineKind)
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 电脑远程调试通道：127.0.0.1:27182（电脑先 adb forward tcp:27182 tcp:27182）
+        DebugServer.sockAppContext = applicationContext
+        DebugServer.start(applicationContext)
         setContent { RootExecTheme { RootExecApp() } }
     }
 }
@@ -142,7 +152,10 @@ private fun InfoTab(rootState: RootState) {
     val info by produceState(initialValue = emptyList<InfoRow>(), rootState) {
         while (true) {
             value = try {
-                Shell.collectInfo(context, rootState)
+                Shell.collectInfo(context, rootState) + InfoRow(
+                    "远程调试",
+                    if (DebugServer.running) "127.0.0.1:27182（adb forward tcp:27182 tcp:27182）" else "未启动"
+                )
             } catch (t: Throwable) {
                 listOf(InfoRow("采集失败", t.message ?: "?"))
             }
@@ -180,6 +193,19 @@ private fun InfoTab(rootState: RootState) {
         }
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("电脑远程调试", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "adb forward tcp:27182 tcp:27182\n" +
+                        "curl -s --data-binary $'PING\\n' --no-buffer telnet://127.0.0.1:27182\n" +
+                        "或使用 nc 127.0.0.1 27182 发送 PING/INFO/CMD <base64>",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("危险命令已禁用", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.error)
                 Text(
                     Shell.BLOCKED_COMMANDS.sorted().joinToString("  "),
@@ -196,21 +222,27 @@ private fun InfoTab(rootState: RootState) {
     }
 }
 
+private val QUICK_COMMANDS = listOf(
+    "id", "getenforce", "uptime", "ps -A | head -20",
+    "ls /data/adb/modules", "dmesg | tail -30", "su -v"
+)
+
 @Composable
 private fun ConsoleTab() {
-    val output = remember { mutableStateListOf<String>() }
+    val lines = remember { mutableStateListOf<ConsoleLine>() }
     val history = remember { mutableStateListOf<String>() }
     var input by remember { mutableStateOf("") }
     var running by remember { mutableStateOf(false) }
     var blocked by remember { mutableStateOf<String?>(null) }
+    var lastExit by remember { mutableStateOf<Int?>(null) }
+    var lastMs by remember { mutableStateOf<Long?>(null) }
     val scope = rememberCoroutineScope()
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val listState = rememberLazyListState()
+    val context = LocalContext.current
 
-    LaunchedEffect(output.size) {
-        if (output.isNotEmpty()) {
-            listState.animateScrollToItem(output.lastIndex)
-        }
+    LaunchedEffect(lines.size) {
+        if (lines.isNotEmpty()) listState.animateScrollToItem(lines.lastIndex)
     }
 
     fun execute(raw: String) {
@@ -225,51 +257,77 @@ private fun ConsoleTab() {
         if (history.size >= 50) history.removeAt(0)
         history.add(cmd)
         input = ""
-        output.add("$ $cmd")
+        lines.add(ConsoleLine("$ $cmd", LineKind.CMD))
         running = true
+        lastExit = null
+        lastMs = null
         scope.launch {
-            withContext(Dispatchers.IO) {
-                Shell.runRootCommand(cmd) { line ->
-                    mainHandler.post { output.add(line) }
-                }
+            val t0 = System.currentTimeMillis()
+            val res = withContext(Dispatchers.IO) {
+                Shell.runRootCommand(
+                    cmd,
+                    onOut = { l -> mainHandler.post { lines.add(ConsoleLine(l, LineKind.OUT)) } },
+                    onErr = { l -> mainHandler.post { lines.add(ConsoleLine(l, LineKind.ERR)) } }
+                )
             }
+            val ms = System.currentTimeMillis() - t0
             mainHandler.post {
                 running = false
-                output.add("")
+                lastExit = res.exitCode
+                lastMs = ms
+                lines.add(ConsoleLine("[exit=${res.exitCode} · ${ms}ms · ${lines.size} 行]", LineKind.SYS))
             }
         }
     }
 
+    fun copyOutput() {
+        val text = lines.joinToString("\n") { it.text }
+        if (text.isEmpty()) return
+        val cm = context.getSystemService(ClipboardManager::class.java)
+        cm?.setPrimaryClip(ClipData.newPlainText("RootExec", text))
+    }
+
     Column(Modifier.fillMaxSize().padding(12.dp)) {
-        if (blocked != null) {
-            Text(
-                blocked!!,
-                color = MaterialTheme.colorScheme.onErrorContainer,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp)
-            )
+        // 快捷命令
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            QUICK_COMMANDS.forEach { qc ->
+                AssistChip(
+                    onClick = { input = qc; execute(qc) },
+                    label = { Text(qc, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+                )
+            }
         }
+        // 输入
         OutlinedTextField(
             value = input,
             onValueChange = { input = it },
-            modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("输入命令（以 root 执行），例如 id / getenforce / uptime") },
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            placeholder = { Text("输入命令（以 root 执行），例如 id / getenforce / ps -A | head") },
             textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
             singleLine = false,
-            maxLines = 3,
+            maxLines = 4,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { execute(input) })
         )
+        blocked?.let { msg ->
+            Text(
+                msg,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+            )
+        }
         Row(
             Modifier.fillMaxWidth().padding(top = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Button(onClick = { execute(input) }, enabled = !running) {
                 if (running) {
-                    CircularProgressIndicator(Modifier.height(16.dp).width(16.dp), strokeWidth = 2.dp)
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                 } else {
                     Text("执行")
                 }
@@ -278,25 +336,39 @@ private fun ConsoleTab() {
                 val last = history.lastOrNull()
                 if (last != null) input = last
             }, enabled = history.isNotEmpty()) { Text("上一条") }
-            TextButton(onClick = { output.clear() }) { Text("清空输出") }
+            TextButton(onClick = {
+                lines.clear(); lastExit = null; lastMs = null
+            }) { Text("清空") }
+            TextButton(onClick = { copyOutput() }, enabled = lines.isNotEmpty()) { Text("复制") }
             Spacer(Modifier.weight(1f))
-            Text("${output.size} 行", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val status = when {
+                running -> "运行中…"
+                lastExit != null -> "exit=$lastExit · ${lastMs}ms"
+                else -> "${lines.size} 行"
+            }
+            Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        HorizontalDivider(Modifier.padding(vertical = 8.dp))
         Card(
-            modifier = Modifier.fillMaxWidth().weight(1f),
+            modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 8.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
         ) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize().padding(8.dp)
             ) {
-                items(output) { line ->
+                items(lines) { line ->
+                    val color = when (line.kind) {
+                        LineKind.CMD -> MaterialTheme.colorScheme.primary
+                        LineKind.ERR -> MaterialTheme.colorScheme.error
+                        LineKind.SYS -> MaterialTheme.colorScheme.onSurfaceVariant
+                        LineKind.OUT -> MaterialTheme.colorScheme.onSurface
+                    }
                     Text(
-                        line.ifEmpty { " " },
+                        line.text.ifEmpty { " " },
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = if (line.kind == LineKind.CMD) FontWeight.Bold else FontWeight.Normal,
+                        color = color,
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
