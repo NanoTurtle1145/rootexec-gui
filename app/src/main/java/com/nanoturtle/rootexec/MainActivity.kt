@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // 电脑远程调试通道：127.0.0.1:27182（电脑先 adb forward tcp:27182 tcp:27182）
         DebugServer.sockAppContext = applicationContext
+        RemoteAuth.init(applicationContext)
         DebugServer.start(applicationContext)
         setContent { RootExecTheme { RootExecApp() } }
     }
@@ -191,6 +192,7 @@ private fun InfoTab(rootState: RootState) {
                 }
             }
         }
+        RemoteAuthCard()
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("电脑远程调试", style = MaterialTheme.typography.titleSmall)
@@ -217,6 +219,86 @@ private fun InfoTab(rootState: RootState) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RemoteAuthCard() {
+    val state by produceState(
+        initialValue = Triple(
+            RemoteAuth.allowDangerous,
+            RemoteAuth.snapshot(),
+            DebugServer.remoteLog.toList()
+        )
+    ) {
+        while (true) {
+            value = Triple(RemoteAuth.allowDangerous, RemoteAuth.snapshot(), DebugServer.remoteLog.toList())
+            delay(1000)
+        }
+    }
+    val allow = state.first
+    val allowed = state.second.sorted()
+    val log = state.third.takeLast(6)
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("远程授权", style = MaterialTheme.typography.titleSmall)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                androidx.compose.material3.Switch(
+                    checked = allow,
+                    onCheckedChange = { RemoteAuth.setAllowDangerous(it) }
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (allow) "已允许远程危险命令（仅限列表内）" else "禁止远程危险命令",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            Text(
+                "已授权（点击移除）：",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                if (allowed.isEmpty()) Text("（空）", style = MaterialTheme.typography.bodySmall)
+                allowed.forEach { c ->
+                    AssistChip(
+                        onClick = { RemoteAuth.remove(c) },
+                        label = { Text(c, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+                    )
+                }
+            }
+            Text(
+                "点击添加授权：",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Shell.BLOCKED_COMMANDS.sorted().filter { it !in allowed }.forEach { c ->
+                    AssistChip(
+                        onClick = { RemoteAuth.add(c) },
+                        label = { Text("+ $c", fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+                    )
+                }
+            }
+            Text(
+                "远程执行记录：",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (log.isEmpty()) {
+                Text("（无）", style = MaterialTheme.typography.bodySmall)
+            } else {
+                log.forEach { line ->
+                    Text(line, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                }
             }
         }
     }

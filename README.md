@@ -37,6 +37,21 @@ CMD=$(printf 'id; getenforce' | base64 -w0)
 printf 'CMD %s\n' "$CMD" | nc 127.0.0.1 27182
 ```
 
+## 远程危险命令授权
+
+远程调试通道**默认拒绝**危险命令（`rm`/`rmdir`/`dd` 等）。若确实需要远程执行，必须在手机 App 里授权：
+
+1. 打开 RootExec → 「信息」页 → 「远程授权」卡片；
+2. 打开总开关「允许远程危险命令」；
+3. 在「点击添加授权」里逐个添加要放行的命令（如 `rm`），点已授权 chip 可移除；
+4. 授权后，远程执行危险命令会先返回
+   `{"type":"authorized","command":"rm"}`，然后再返回 stdout/stderr 与 exit；
+5. 未授权时返回
+   `{"type":"blocked","command":"rm","reason":"需要 App 授权：请在 RootExec 的「远程授权」列表中允许 rm"}`；
+6. 「远程执行记录」显示最近 30 条远程执行/拒绝记录（含时间）。
+
+授权状态保存在 `SharedPreferences("remote_auth")`，重启 App 后仍有效；总开关关闭时，即使列表里有命令也会拒绝。
+
 ## 构建
 
 - 环境：JDK 21、Android SDK 37、Gradle 9.7.1、AGP 9.3.2、Kotlin 2.4.10

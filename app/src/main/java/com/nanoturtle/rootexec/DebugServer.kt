@@ -41,6 +41,16 @@ object DebugServer {
     var running: Boolean = false
         private set
 
+    /** 远程执行记录（含被拒绝/已授权），UI 里展示最近若干条。 */
+    val remoteLog: MutableList<String> =
+        java.util.Collections.synchronizedList(mutableListOf<String>())
+
+    private fun log(line: String) {
+        val t = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+        remoteLog.add("[$t] $line")
+        while (remoteLog.size > 30) remoteLog.removeAt(0)
+    }
+
     fun start(context: Context): Boolean {
         if (running) return true
         return try {
@@ -103,9 +113,22 @@ object DebugServer {
                             continue
                         }
                         val danger = Shell.findDangerous(cmd)
-                        if (danger != null) {
-                            writer.println(json { it.put("type", "blocked").put("command", danger) })
+                        if (danger != null && !RemoteAuth.isAuthorized(danger)) {
+                            log("拒绝 $danger（未授权）: $cmd")
+                            writer.println(json {
+                                it.put("type", "blocked").put("command", danger)
+                                    .put(
+                                        "reason",
+                                        "需要 App 授权：请在 RootExec 的「远程授权」列表中允许 $danger"
+                                    )
+                            })
                             continue
+                        }
+                        if (danger != null) {
+                            log("已授权 $danger: $cmd")
+                            writer.println(json { it.put("type", "authorized").put("command", danger) })
+                        } else {
+                            log("执行: $cmd")
                         }
                         val start = System.currentTimeMillis()
                         Shell.runRootCommand(
