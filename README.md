@@ -7,6 +7,9 @@
 
 - **信息面板**：设备型号、Android 版本、内核版本、架构、SELinux 状态、KernelSU 是否加载、
   运行时长、内存、负载、电量、Root 授权状态与 root 通道。
+- **SELinux 模式**：信息页开关一键切 Permissive / Enforcing（`setenforce 0/1`），并显示执行结果。
+  状态读取优先 `/sys/fs/selinux/enforce`，App 域被 selinuxfs 拒绝时自动回退到 root 的 `getenforce`
+  （KSU late-load 会把 SELinux 拉回 Enforcing，用这个开关即可再切回 Permissive，无需重启）。
 - **控制台**：root 命令执行（`su -c` 优先，自动回退到 43499 临时 root helper）、
   stdout/stderr 分色显示、退出码与耗时、命令历史、快捷命令、复制输出、自动滚动。
 - **危险命令拦截**：`rm` `rmdir` `dd` `mkfs` `mke2fs` `mkswap` `wipe` `shred` `fdisk`

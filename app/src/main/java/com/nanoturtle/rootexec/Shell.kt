@@ -127,6 +127,28 @@ object Shell {
         }
     }
 
+    /**
+     * 当前 SELinux 模式：true=Enforcing，false=Permissive，拿不到返回 null。
+     *
+     * 注意：普通 App 域读 /sys/fs/selinux/enforce 会被 selinuxfs 拒绝，所以先试文件、
+     * 读不到再走 root 的 `getenforce`。
+     */
+    fun selinuxEnforcing(): Boolean? {
+        readFile("/sys/fs/selinux/enforce", 8)?.trim()?.let { return it == "1" }
+        val out = runRootCommand("getenforce").lines.map { it.trim() }
+        return when {
+            out.any { it == "Enforcing" } -> true
+            out.any { it == "Permissive" } -> false
+            else -> null
+        }
+    }
+
+    /** 切换 SELinux（setenforce 1/0），返回 (退出码, 输出)。走 runRootCommand 的 root 通道。 */
+    fun setSelinux(enforcing: Boolean): Pair<Int, String> {
+        val r = runRootCommand("setenforce ${if (enforcing) 1 else 0}; getenforce")
+        return r.exitCode to r.lines.joinToString("\n").trim()
+    }
+
     private fun readFile(path: String, maxLen: Int = 4096): String? = try {
         val f = File(path)
         if (!f.exists()) null else f.readText().take(maxLen)
@@ -155,12 +177,7 @@ object Shell {
         rows.add(InfoRow("内核", System.getProperty("os.version") ?: "?"))
         rows.add(InfoRow("架构", Build.SUPPORTED_ABIS.firstOrNull() ?: "?"))
 
-        val enforce = readFile("/sys/fs/selinux/enforce", 8)?.trim()
-        val selinux = when (enforce) {
-            "1" -> "Enforcing"
-            "0" -> "Permissive"
-            else -> "未知"
-        }
+        val selinux = selinuxEnforcing()?.let { if (it) "Enforcing" else "Permissive" } ?: "未知"
         rows.add(InfoRow("SELinux", selinux))
 
         val modules = readFile("/proc/modules", 65536)

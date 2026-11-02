@@ -192,6 +192,7 @@ private fun InfoTab(rootState: RootState) {
                 }
             }
         }
+        SelinuxCard()
         RemoteAuthCard()
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -216,6 +217,61 @@ private fun InfoTab(rootState: RootState) {
                 )
                 Text(
                     "控制台中的命令会在执行前检查；rm/rmdir/dd 等破坏性命令以及 sh -c / su -c 包装内的同类命令都会被拦截。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelinuxCard() {
+    val enforcing by produceState(initialValue = Shell.selinuxEnforcing()) {
+        while (true) {
+            value = Shell.selinuxEnforcing()
+            delay(1000)
+        }
+    }
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<String?>(null) }
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("SELinux 模式", style = MaterialTheme.typography.titleSmall)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                androidx.compose.material3.Switch(
+                    checked = enforcing == false,
+                    enabled = !busy && enforcing != null,
+                    onCheckedChange = { wantPermissive ->
+                        busy = true
+                        result = null
+                        scope.launch(Dispatchers.IO) {
+                            val (code, out) = Shell.setSelinux(!wantPermissive)
+                            withContext(Dispatchers.Main) {
+                                result = if (code == 0) {
+                                    out.ifEmpty { if (wantPermissive) "已切到 Permissive" else "已切回 Enforcing" }
+                                } else {
+                                    "失败(exit=" + code + ")：" + out.takeLast(120)
+                                }
+                                busy = false
+                            }
+                        }
+                    }
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    when (enforcing) {
+                        null -> "未知"
+                        true -> "Enforcing（打开开关=Permissive）"
+                        false -> "Permissive"
+                    },
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            result?.let {
+                Text(
+                    it,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
